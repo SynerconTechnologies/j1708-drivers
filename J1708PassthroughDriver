@@ -12,12 +12,12 @@ logging_socket = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
 logging_socket.bind(('localhost',13373))
 
 class PassThread(threading.Thread):
-    def __init__(self,inport,outport,name,filelock):#name is either "ECM" or "DPA"
+    def __init__(self,inport,outport,name):#name is either "ECM" or "DPA"
         super(PassThread,self).__init__()
         self.inport = inport
         self.outport = outport
         self.name = name
-        self.filelock = filelock
+
 
     def apply_filter(self,message):
         return [message]
@@ -27,12 +27,13 @@ class PassThread(threading.Thread):
     def run(self):
         while True:
             msg = self.inport.read_message(checksum=True)
-            #subclass PassThread to get a different apply_filter function.
-
-
             if msg is not None and len(msg) > 0:
                 self.outport.send_message(msg,has_check=True)
-                
+                proto = "J1708"
+                sr = "RM" if self.name == "ECM" else "SM"
+                data = ",".join(list(map(lambda x: "%x" % x,msg)))
+                to_send = bytes(','.join([proto,sr,data]),"ascii")
+                logging_socket.sendto(to_send,('localhost',13371))
 
     
 
@@ -41,10 +42,9 @@ class PassThread(threading.Thread):
 if __name__ == '__main__':
     ecmdriver = J1708Driver.J1708Driver(J1708Driver.ECM)
     dpadriver = J1708Driver.J1708Driver(J1708Driver.DPA)
-    writelock = threading.Lock()
     threads = []
-    threads.append(PassThread(ecmdriver,dpadriver,"ECM",writelock))
-    threads.append(PassThread(dpadriver,ecmdriver,"DPA",writelock))
+    threads.append(PassThread(ecmdriver,dpadriver,"ECM"))
+    threads.append(PassThread(dpadriver,ecmdriver,"DPA"))
     list(map(lambda x: x.start(),threads))
     list(map(lambda x: x.join(), threads))
 

@@ -116,8 +116,8 @@ void * WriteThread(void* args){
     write(fd,msg_buf,len);
     usleep(sleeptime);
     len2 = read(fd,&read_buf,len);
-    printf("%s","ECM cleared from message buffer: ");
-    ppj1708(len2,read_buf);
+    //    printf("%s","ECM cleared from message buffer: ");
+    //    ppj1708(len2,read_buf);
     if(!memcmp(msg_buf,read_buf,len)){
       sent = 1;
     }else{
