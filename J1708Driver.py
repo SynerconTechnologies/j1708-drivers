@@ -57,6 +57,7 @@ class J1708Driver():
 
 #Test to see if this works. Reads 10 messages, sends a CAT ATA SecuritySetup message.
 #You should see a reply of the form \x80\xfe\xac\xf0\x?? if it works
+#Note: this will only work with Caterpillar ECMs.
 if __name__ == '__main__':
     driver = J1708Driver(ECM)
     for i in range(0,10):
