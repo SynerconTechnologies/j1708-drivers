@@ -1,11 +1,3 @@
-/*
-  ECM Driver. 
-  To compile: gcc -pthread -o ecm ecm.c
-  To run: ./ecm&
-  Make sure to load capes first.
-  Be sure to use 0xAC for the MID of the BBOne when writing software
- */
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +45,8 @@ pthread_mutex_t buslock;
 int fd;
 struct termios options;
 
+/* Read thread: reads messages from J1708 bus, sends to local UDP socket to be read by the Python driver.
+ */
 void * ReadThread(void* args){
   int len;
   int check;
@@ -69,6 +63,9 @@ void * ReadThread(void* args){
     check = j1708_checksum(len,msg_buf);
     if(!check && len != 0){
       placeholder = 0;
+      /*Because we keep getting concatenated messages if they're sent very close together, this is a hack to try to separate them.
+       *If any portion of a long message has a checksum of 0, send it on as its own message and then continue. Obviously not ideal.
+       */
       for(i=0; i<len ; i++){
 	if(i-placeholder > 0 && msg_buf[i] == 0x80 && !j1708_checksum(i-placeholder,&msg_buf[placeholder])){
 	  //	  printf("%s","ECM SENDING STUCK MESSAGE: ");
@@ -86,6 +83,7 @@ void * ReadThread(void* args){
 
 }
 
+/*Write thread. Reads messages from UDP socket and sends them to the J1708 bus.*/
 void * WriteThread(void* args){
   int gpio;
   int len;
@@ -114,10 +112,19 @@ void * WriteThread(void* args){
 
     //fprintf(stderr,"sending a message!\n");
     write(fd,msg_buf,len);
+    //Wait for the UART to finish sending the message onto the bus.
     usleep(sleeptime);
+    /* Read the message back. If we don't do this, it will be read by the read thread.
+     * This also helps collision detection.
+     */
     len2 = read(fd,&read_buf,len);
     //    printf("%s","ECM cleared from message buffer: ");
     //    ppj1708(len2,read_buf);
+
+    /* Quick and dirty collision detection.
+     * Compare data read back from the bus with the data that we tried to send.
+     * If they're different, we know that there was a collision. Retry until success.
+     */
     if(!memcmp(msg_buf,read_buf,len)){
       sent = 1;
     }else{
@@ -133,8 +140,7 @@ void * WriteThread(void* args){
 }
 
 int main(int argc, char* argv[]){
-  //char* sock_name = "/tmp/ECM";
-  //char* client_name = "/tmp/DPA";
+
   void* status;
   pthread_t threads[2];
   int rcw;
@@ -142,6 +148,9 @@ int main(int argc, char* argv[]){
   int i;
 
   iosetup();
+
+  /* Open the TTY, set it up as a raw terminal.
+   */
   fd = open("/dev/ttyO2",O_RDWR|O_NOCTTY|O_NONBLOCK);
 
   tcgetattr(fd, &options);
@@ -155,15 +164,15 @@ int main(int argc, char* argv[]){
   tcsetattr(fd,TCSANOW,&options);
   
 
-  /*Get the socket set up*/
-  //unlink(sock_name);
-
-  
+  /* UDP port for receiving messages to send to the bus.
+   */
   memset(&my_addr,0,sizeof(my_addr));
   my_addr.sin_family = AF_INET;
   my_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   my_addr.sin_port = htons(6969);
 
+  /* UDP port for sending received messages.
+   */
   memset(&other_addr,0,sizeof(other_addr));
   other_addr.sin_family = AF_INET;
   other_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -177,6 +186,8 @@ int main(int argc, char* argv[]){
   if(bind(read_socket, (struct sockaddr *) &my_addr, sizeof(my_addr)) < 0)
     printf("%s\n","Could not bind ECM socket.");
 
+
+  /*Lock for synchronizing bus access between read & write threads*/
   pthread_mutex_init(&buslock,NULL);
 
   rcr = pthread_create(&threads[0], NULL, ReadThread, NULL);
@@ -190,6 +201,7 @@ int main(int argc, char* argv[]){
  
 }
 
+/*J1708 checksum function. Return 0 -> check successful*/
 char j1708_checksum(int len, char* msgbuf){
   char total = 0;
   int i;
@@ -201,6 +213,7 @@ char j1708_checksum(int len, char* msgbuf){
   return total + msgbuf[len-1];
 }
 
+/*Pretty-print j1708 messages. Useful for debugging.*/
 void ppj1708(int len, char* msgbuf){
   int i;
   for(i = 0; i<len; i++){
@@ -212,6 +225,7 @@ void ppj1708(int len, char* msgbuf){
 
 }
 
+/*Function to calculate time delta between two timespec structs*/
 struct timespec diff(struct timespec start, struct timespec end)
 {
   struct timespec temp;
@@ -233,12 +247,13 @@ int difftimenanos(struct timespec diffspec){
   return open(gp_path, O_RDONLY | O_NONBLOCK);
   }*/
 
+/*Read value of bus to determine activity. Bus is idle high.*/
 int read_gpio(){
   return *(gpio + GPIO_IN) & GPIO1_28;
   }
 
 
-
+/*Poll gpio to synchronize with bus.*/
 int synchronize(){
   struct timespec start;
   struct timespec temp_time;
@@ -268,7 +283,7 @@ int read_j1708_message(int serial_port, char* buf, pthread_mutex_t *lock){
   //inter-char timeout
   struct timespec timeout;
   timeout.tv_sec = 0;
-  //CHANGE THIS FOR DETROIT DIESEL/CAT/ETC
+  //Time is different from the standard because syscall context switch, etc. changes timing.
   timeout.tv_nsec = TENTH_BIT_TIME * 93;
   
   fd_set fds;
@@ -317,6 +332,11 @@ void wait_for_quiet(int gpio_fd,int priority,pthread_mutex_t *lock){
   
 }
 
+/*Set up mmap'd region for reading GPIO.
+ *Have to read memory region directly instead of using sysfs interface because
+ *using the sysfs interface at the rate that we do makes the system grind to a halt.
+ *Also the sysfs interface has too much latency. 
+ */
 static void iosetup(void){
 
   /* open /dev/mem */
@@ -346,45 +366,4 @@ static void iosetup(void){
 
 
 }
-
-/*void wait_for_quiet(int gpio_fd,int priority,pthread_mutex_t *lock){
-  fd_set exceptfds;
-  int res;
-  int len;
-  char* dummy[64];
-  struct timespec timeout;
-  struct timespec sleepspec;
-
-  pthread_mutex_lock(lock);
-
-  timeout.tv_sec = 0;
-  timeout.tv_nsec = 10*BIT_TIME + 2 * BIT_TIME * priority;
-
-  sleepspec.tv_sec = 0;
-  sleepspec.tv_nsec = BIT_TIME*4;
-  
-
-  FD_ZERO(&exceptfds);
-  FD_SET(gpio_fd,&exceptfds);
-
-
-   This might require some explanation. The GPIO pin is set to trigger an event
-     on a rising or falling edge. The default state of a J1708 bus is HIGH, and the standard
-     requires that sending clients wait to see *n* consecutive high bits (idle bus)
-     before sending. If the pselect call returns before it times out, it's seen an edge and
-     therefore the bus is not quiet. If it times out, the bus is quiet.
-
-     This is *kind of* busy waiting, which is bad, but using pselect should hopefully reduce
-     the impact.
-  
-  lseek(gpio_fd,0,SEEK_SET);
-  len = read(gpio_fd,dummy,1);
-
-  while(res=pselect(gpio_fd+1,NULL,NULL,&exceptfds,&timeout,NULL)){
-    lseek(gpio_fd,0,SEEK_SET);
-    len = read(gpio_fd,dummy,1);
-    pthread_mutex_unlock(lock);
-    pthread_mutex_lock(lock);
-  }
-}*/
 
